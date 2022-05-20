@@ -3,7 +3,6 @@ package internal
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 )
@@ -27,17 +26,8 @@ func (fs *FSRepo) Store(topic, fpath string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	src, err := os.Open(fpath)
-	if err != nil {
-		return "", fmt.Errorf("opening source: %w", err)
-	}
 	dstPath := fs.path(topic, fpath)
-	dst, err := os.Create(dstPath)
-	if err != nil {
-		return "", fmt.Errorf("creating %s: %w", dstPath, err)
-	}
-	_, err = io.Copy(dst, src)
-	return dstPath, err
+	return dstPath, os.Rename(fpath, dstPath)
 }
 
 func (fs *FSRepo) Get(topic, name string) (*os.File, error) {
