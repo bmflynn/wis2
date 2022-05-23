@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"log"
 	"os"
 	"path"
 	"strings"
@@ -25,10 +24,8 @@ var (
 )
 
 type service struct {
-	errLog   *log.Logger
-	debugLog *log.Logger
-	log      *log.Logger
-	verbose  bool
+	log     *internal.Logger
+	verbose bool
 
 	receiver internal.Receiver
 	repo     internal.Repo
@@ -38,10 +35,8 @@ type service struct {
 
 func newService(recv internal.Receiver, repo internal.Repo, command string, verbose bool) service {
 	return service{
-		errLog:   log.New(os.Stderr, "ERROR: ", log.LstdFlags),
-		debugLog: log.New(os.Stderr, "DEBUG: ", log.LstdFlags|log.Lshortfile),
-		log:      log.Default(),
-		verbose:  verbose,
+		log:     internal.NewLogger(verbose),
+		verbose: verbose,
 
 		receiver: recv,
 		repo:     repo,
@@ -50,6 +45,8 @@ func newService(recv internal.Receiver, repo internal.Repo, command string, verb
 	}
 }
 
+// validateMessage returns an error if the message likely will not be able to
+// be downloaded, nil if it's ok to try an ingest.
 func (svc *service) validateMessage(msg *internal.Message) error {
 	// Verify message is valid
 	topic := msg.Topic
@@ -68,73 +65,112 @@ func (svc *service) validateMessage(msg *internal.Message) error {
 	return nil
 }
 
-func (svc *service) debugf(fmt string, args ...interface{}) {
-	if svc.verbose {
-		svc.debugLog.Printf(fmt, args...)
-	}
-}
-
-func (svc *service) errorf(fmt string, args ...interface{}) {
-	svc.errLog.Printf(fmt, args...)
-}
-
 func (svc *service) Run(ctx context.Context, numWorkers int) error {
-	work := make(chan internal.Work)
-	results := make(chan internal.WorkResult)
-
-	// Put Work functions on the work queue
-	go func() {
-		for svc.receiver.Next() {
-			msg := svc.receiver.Message()
-			if err := svc.validateMessage(msg); err != nil {
-				svc.log.Printf("skipping! %s", err)
-			}
-			svc.debugf("submitting for ingest: %+v", msg)
-			work <- func() (any, error) {
-				return ingestOne(ctx, msg, svc.repo)
-			}
-		}
-	}()
+	wg := &sync.WaitGroup{}
+	tasks := make(chan task)
+	results := make(chan taskResult)
 
 	// Start the workers consuming from the work queue and populating the results queue.
 	// Workers will run until the source messages channel is closed which will occur when
 	// the upstream broker closes its message channel or the main context is canceled.
-	svc.debugf("starting %d download workers", numWorkers)
-	wg := &sync.WaitGroup{}
+	svc.log.Debug("starting %d download workers", numWorkers)
+	workerWg := &sync.WaitGroup{}
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		worker := internal.NewWorker(i, work, results)
-		go worker.Run(wg)
+		workerWg.Add(1)
+		go svc.worker(workerWg, tasks, results)
 	}
 
-	// Handle results serially
-	for zult := range results {
-		f := zult.Result.(ingestFile)
-		svc.log.Printf("ingested %s to %s in %v", f.Source, f.Dest, zult.Finished.Sub(zult.Started))
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		svc.debugf("executing '%s %s %s'", svc.command, f.Topic, f.Dest)
-		if err := svc.executor(ctx, svc.command, f.Topic, f.Dest); err != nil {
-			svc.errorf("command failed on %s: %s", f.Dest, err)
+	// Put tasks on the work queue
+	wg.Add(1)
+	go func() {
+		defer close(tasks)
+		defer wg.Done()
+		for svc.receiver.Next() {
+			msg := svc.receiver.Message()
+			svc.log.Info("received topic='%s' url='%s'", msg.Topic, msg.Payload.URL())
+			if err := svc.validateMessage(msg); err != nil {
+				svc.log.Info("skipping! %s", err)
+				continue
+			}
+			svc.log.Debug("submitting: %+v", msg)
+			tasks <- task{msg: msg, repo: svc.repo}
 		}
-		cancel()
-	}
+		svc.log.Debug("no more work")
+	}()
 
-	// Make sure workers exit cleanly
+	// Handle the task results
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for zult := range results {
+			f := zult.Result
+			topic := zult.Result.msg.Topic
+			url := zult.Result.msg.Payload.URL()
+			if zult.Err != nil {
+				svc.log.Error("ingest failed topic='%s' url='%s': %s", url, topic, zult.Err)
+				continue
+			}
+
+			svc.log.Info("ingested %s to %s in %v", url, f.path, zult.Finished.Sub(zult.Started))
+			if svc.command == "" {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			svc.log.Debug("executing '%s %s %s'", svc.command, topic, f.path)
+			if err := svc.executor(ctx, svc.command, topic, f.path); err != nil {
+				svc.log.Error("command failed on %s: %s", f.path, err)
+			}
+			cancel()
+		}
+		svc.log.Debug("no more results")
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Make sure workers exit cleanly
+		workerWg.Wait()
+		svc.log.Debug("all workers have finished")
+		close(results)
+	}()
+
 	wg.Wait()
 
 	return nil
 }
 
-type ingestFile struct {
-	Topic  string
-	Source string
-	Dest   string
+type task struct {
+	repo internal.Repo
+	msg  *internal.Message
 }
 
-func ingestOne(ctx context.Context, msg *internal.Message, repo internal.Repo) (ingestFile, error) {
+type taskResult struct {
+	Result            ingestResult
+	Err               error
+	Started, Finished time.Time
+}
+
+func (svc service) worker(wg *sync.WaitGroup, in <-chan task, out chan<- taskResult) {
+	defer wg.Done()
+	for task := range in {
+		i, err := ingestOne(task.msg, task.repo)
+		out <- taskResult{
+			Result: i,
+			Err:    err,
+		}
+	}
+	svc.log.Debug("worker exiting")
+}
+
+type ingestResult struct {
+	msg  *internal.Message
+	path string
+}
+
+func ingestOne(msg *internal.Message, repo internal.Repo) (ingestResult, error) {
 	wis := msg.Payload
 	url := wis.URL()
-	zult := ingestFile{Topic: msg.Topic, Source: url}
+	zult := ingestResult{msg: msg}
 	fetcher := defaultFetcherFactory(url)
 
 	// Fetch the file to a temporary location
@@ -153,7 +189,7 @@ func ingestOne(ctx context.Context, msg *internal.Message, repo internal.Repo) (
 		return zult, fmt.Errorf("integrity check failed: %w", err)
 	}
 
-	zult.Dest, err = repo.Store(msg.Topic, tmp.Name())
+	zult.path, err = repo.Store(msg.Topic, tmp.Name())
 	return zult, err
 }
 

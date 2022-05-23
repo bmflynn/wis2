@@ -10,16 +10,18 @@ import (
 
 var supportedIntegrities = regexp.MustCompile(`^(?:md5|sha256|sha512)$`)
 
+type Integrity struct {
+	Method string `json:"method"`
+	Value  string `json:"value"`
+}
+
 type WISMessage struct {
 	PubTime   *time.Time `json:"pubTime"`
 	BaseURL   string     `json:"baseUrl"`
 	RelPath   string     `json:"relPath"`
-	Integrity struct {
-		Method string `json:"method"`
-		Value  string `json:"value"`
-	}
-	Size    int64  `json:"size"`
-	RetPath string `json:"retPath"`
+	Integrity Integrity  `json:"integrity"`
+	Size      int64      `json:"size"`
+	RetPath   string     `json:"retPath"`
 }
 
 func (msg WISMessage) URL() string {
@@ -45,8 +47,8 @@ func (msg WISMessage) IsValid() error {
 	case msg.Integrity.Method == "sha512" && len(msg.Integrity.Value) != 128:
 		return fmt.Errorf("invalid sha512: %s", msg.Integrity.Value)
 	case msg.Integrity.Method == "sha256" && len(msg.Integrity.Value) != 64:
-		return fmt.Errorf("invalid sha512: %s", msg.Integrity.Value)
-	case msg.Integrity.Method == "md5" && len(msg.Integrity.Value) != 48:
+		return fmt.Errorf("invalid sha256: %s", msg.Integrity.Value)
+	case msg.Integrity.Method == "md5" && len(msg.Integrity.Value) != 32:
 		return fmt.Errorf("invalid %s: %s", msg.Integrity.Method, msg.Integrity.Value)
 	}
 	return nil

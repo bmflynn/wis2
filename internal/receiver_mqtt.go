@@ -58,7 +58,7 @@ func parseURL(url string) (*_url.URL, error) {
 	var port int
 	switch u.Scheme {
 	case "tcp":
-		port = 1833
+		port = 1883
 	case "ssl":
 		port = 8883
 	default:

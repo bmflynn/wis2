@@ -29,6 +29,7 @@ type Fetcher interface {
 
 type FetcherFactory func(url string) Fetcher
 
+// FindFetcher returns a fetcher for the URL, if available, otherwise nil.
 func FindFetcher(url string) Fetcher {
 	u, err := _url.Parse(url)
 	if err != nil {
@@ -90,6 +91,9 @@ func newNetrcCredentialFactory(fpath string) CredentialGetter {
 			return "", "", err
 		}
 		m := n.Machine(host)
+		if m == nil {
+			return "", "", nil
+		}
 		return m.Get("login"), m.Get("password"), nil
 	}
 }

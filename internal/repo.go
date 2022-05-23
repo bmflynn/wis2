@@ -18,7 +18,7 @@ type FSRepo struct {
 }
 
 func (fs *FSRepo) path(topic, name string) string {
-	return filepath.Join(fs.root, filepath.Base(name))
+	return filepath.Join(fs.root, topic, filepath.Base(name))
 }
 
 func (fs *FSRepo) Store(topic, fpath string) (string, error) {
