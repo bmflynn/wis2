@@ -64,7 +64,7 @@ Flags
 	pflag.PrintDefaults()
 }
 
-func main() {
+func Execute() error {
 	pflag.Parse()
 	flags := pflag.CommandLine
 
@@ -72,27 +72,25 @@ func main() {
 	chkflag(err)
 	if help {
 		pflag.Usage()
-		os.Exit(0)
+    return nil
 	}
 
 	showVer, err := flags.GetBool("version")
 	chkflag(err)
 	if showVer {
 		fmt.Println(filepath.Base(os.Args[0]), version)
-		os.Exit(0)
+    return nil
 	}
 
 	brokerURL, err := flags.GetString("broker")
 	chkflag(err)
 	if brokerURL == "" {
-		fmt.Println("--broker must be specified")
-		os.Exit(1)
+		return fmt.Errorf("--broker must be specified")
 	}
 	topics, err := flags.GetStringSlice("topic")
 	chkflag(err)
 	if len(topics) == 0 {
-		fmt.Println("no topics specified")
-		os.Exit(1)
+		return fmt.Errorf("no topics specified")
 	}
 	ignoreTopicErrs, err := flags.GetBool("ignore-topic-errors")
 	chkflag(err)
@@ -132,4 +130,13 @@ func main() {
 	if err := service.Run(ctx, workers); err != nil {
 		log.Fatalf("failed! %s", err)
 	}
+
+  return nil
+}
+
+func main() {
+  if err := Execute(); err != nil {
+    fmt.Printf("ERROR: %s\n", err)
+    os.Exit(2)
+  }
 }
